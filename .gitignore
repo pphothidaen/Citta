@@ -343,6 +343,24 @@ paket-files/
 **/__pycache__/
 *.pyc
 
+# Python virtual environments
+.venv/
+venv/
+env/
+
+# Secrets — never commit
+.env
+
+# Pytest / coverage
+.pytest_cache/
+*.pytest_cache
+.coverage
+htmlcov/
+
+# Distribution / packaging
+dist/
+*.egg-info/
+
 # Cake - Uncomment if you are using it
 #tools/**
 #!tools/packages.config
