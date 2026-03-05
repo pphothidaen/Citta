@@ -1,2 +1,4 @@
 # Citta
-A Zero-Waste Agentic AI Distributed Architecture. Orchestrating Local LLMs (Mac M4), Enterprise Data Lakes (DS224+), and Legacy Edge Scrapers (ARM) into a unified "Stream of Consciousness." Decoupled, token-efficient, and privacy-first. “Knowledge is not a static state, but a continuous process of arising and ceasing.”
+Citta is a zero-waste, distributed AI ecosystem designed for continuous web-intelligence and cognitive processing. Built on a decoupled edge-to-core architecture, it orchestrates Local LLMs, persistent Data Lakes, and low-power Edge Scrapers into a unified "Stream of Consciousness."
+
+“Knowledge is not a static state, but a continuous process of arising and ceasing.”
