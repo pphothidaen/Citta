@@ -1,113 +1,176 @@
 # MASTER BLUEPRINT V16 FINAL
 
 ## Purpose
-เอกสารนี้เป็นแผนสถาปัตยกรรมหลักของระบบ Citta ฉบับอัปเดตตามทรัพยากรจริงที่มีอยู่ โดยยึดหลัก:
+This document defines the current Citta architecture and execution strategy based on the latest real hardware baseline. The system starts with a small Docker-based Proof of Concept on Node 1, then migrates gradually into a phased long-term architecture.
+
+### Core Principles
 - Zero-Waste
 - Slow-but-Never-Down
 - Privacy-first
-- Decoupled architecture
-- ใช้ hardware ให้เหมาะกับประเภทงาน
+- Docker-first where appropriate
+- Keep all nodes under a bounded operating threshold
+- Target hard limit below 80%
+- Normalize all AI/API outputs before treating them as canonical
 
 ---
 
-## Design Principles
+## Phase 1 First: Small PoC on Node 1
 
-1. **Compute แยกจาก Storage**
-   - Node 1 ทำงาน AI/LLM
-   - Node 5 ทำงาน service/orchestration
-   - Node 2 ทำงาน durability/storage
+### Goal
+Validate the full system flow on a single machine before distributed deployment.
 
-2. **Degrade gracefully**
-   - ถ้า AI node ไม่พร้อม ระบบต้องยังตอบได้
-   - ถ้า NAS ไม่พร้อม งาน hot path ต้องยังทำงานต่อได้ชั่วคราว
+### Node Used
+- **Node 1 only**
 
-3. **Use the right model for the right task**
-   - งาน routing / tagging ใช้ model เล็ก
-   - งาน structured generation ใช้ model กลาง
-   - งาน reasoning ลึกใช้ model ใหญ่บน Mac M4
+### Components in the PoC
+- FastAPI
+- Redis
+- Qdrant
+- mock ingestion worker
+- mock summarization worker
+- normalization layer
+- optional bot bridge mock
+- local LLM runtime or equivalent integration
 
-4. **Local fast storage for hot path**
-   - Hot inference ใช้ Node 1 NVMe
-   - Hot service ใช้ Node 5 SSD
-   - Backup/snapshots ไป Node 2
+### Deployment Style
+- Docker Compose on Node 1
+- small bounded datasets only
+- local persistence only
+- no heavy production load
+- no external dependency required for baseline flow validation
 
-5. **Unassigned assets stay non-critical**
-   - storage ที่ยังไม่ verify ห้ามใช้เป็น production dependency
+### Acceptance Gate
+Phase 1 is considered successful only when:
+1. The stack runs reliably on Node 1.
+2. End-to-end flow works.
+3. Retrieval, validation, queueing, and formatting all work.
+4. Response schema remains consistent.
+5. Kilo extension can call the system successfully.
+6. Restarting the stack does not break the flow.
+7. Resource usage remains under the defined threshold envelope.
 
 ---
 
-## Current End-State Node Roles
+## Why PoC on Node 1 First
 
-| Node | Role |
-|------|------|
-| Node 1 | Primary LLM / AI Compute |
-| Node 2 | Durable NAS / Backup / Archive |
-| Node 3 | Utility / Watchdog / Backup Verifier |
-| Node 4 | Edge Ingestion / Headless Collectors |
-| Node 5 | API Gateway / Redis / Qdrant / Semantic Router / Orchestration |
+### Benefits
+- fastest validation path
+- lowest debugging complexity
+- minimal network variables
+- easy local inspection of logs, queues, and volumes
+- reduced migration risk
+
+### Accepted Rework
+- services will later move from Node 1 to Node 2
+- bounded PoC data will later be migrated
+- API base URLs and service endpoints will later be reconfigured
+
+---
+
+## Phase 2 — Begin Real Development and Controlled Migration
+
+### Goal
+Move from single-node proof into a resilient service-oriented baseline.
+
+### First Services to Migrate
+1. FastAPI
+2. Redis
+3. Qdrant
+4. normalization service
+5. scheduler / queue workers
+
+### Destination
+- **Node 2** becomes the always-on service core
+
+### Node 1 Keeps
+- coding workstation role
+- premium AI compute
+- deeper reasoning
+- deferred high-complexity tasks
+
+### Rules
+- Node 2 becomes the always-on control plane
+- Node 1 becomes premium/on-demand compute
+- Node 3 becomes durable storage authority
+- Node 4 becomes watchdog / utility / staging
+- Node 5 stays optional and non-critical
+
+---
+
+## Long-Term Node Roles
+
+| Node | Long-Term Role |
+|------|----------------|
+| Node 1 | Coding workstation + premium AI compute |
+| Node 2 | Always-on service core |
+| Node 3 | Durable archive / backup / snapshots |
+| Node 4 | Watchdog / utility / staging |
+| Node 5 | Edge watcher / collector |
+| External Operator | Mobile command / status interface |
 
 ---
 
 ## Service Placement
 
-### Node 1 — MacBook Pro M4
+### Node 1
 **Run**
-- Ollama or equivalent local LLM runtime
-- heavy reasoning tasks
-- embeddings / reranking
-- evaluation and model testing
-
-**Do not make primary**
-- long-term archive
-- only-copy backups
-- critical shared database persistence
-
-### Node 2 — Synology DS224+
-**Run / Store**
-- archive
-- snapshots
-- backup targets
-- historical logs
-- exported datasets
-
-**Do not use as**
-- primary low-latency database path
-- heavy compute runtime
-
-### Node 3 — DIY J1900 NAS
-**Run**
-- monitoring
-- health checks
-- backup verification
-- rsync / checksum / retention jobs
-- archive staging
+- local development
+- PoC stack during Phase 1
+- local LLM runtime
+- heavy reasoning
+- deep summarization
+- response shaping
 
 **Avoid**
-- heavy AI workloads
-- high-concurrency services
+- becoming the final always-on service center
 
-### Node 4 — Huawei Y9 2018 x2
-**Run**
-- data collection
-- payload submission
-- edge scraping
-- remote capture
-
-**Avoid**
-- orchestration
-- durable storage
-- critical-path processing
-
-### Node 5 — Lenovo ThinkCentre M720q
+### Node 2
 **Run**
 - FastAPI
 - Redis
 - Qdrant
+- scheduler
 - workers
-- semantic router
-- validation layer
-- task queue
-- retrieval orchestration
+- normalization service
+- bot bridge
+- bounded logs
+
+**Avoid**
+- long-term archive
+- detached cold backup storage
+
+### Node 3
+**Run / Store**
+- snapshots
+- backups
+- archive
+- exported reports
+- historical outputs
+
+**Avoid**
+- live hot database path
+
+### Node 4
+**Run**
+- watchdog services
+- health probes
+- retention jobs
+- checksum helpers
+- staging workflows
+
+**Avoid**
+- heavy inference
+- high-concurrency apps
+
+### Node 5
+**Run**
+- background source watchers
+- lightweight collectors
+- polling jobs
+- raw feed submission
+
+**Avoid**
+- critical orchestration
 
 ---
 
@@ -115,138 +178,126 @@
 
 ### Hot Tier
 - Node 1 ADATA NVMe 2TB
-- Node 5 SATA SSD 256GB
+- Node 2 SATA SSD 256GB
 
 ### Warm Tier
-- Node 2 Seagate Exos 8TB x2
-- optional Node 3 staging disk
+- Node 3 Seagate Exos 8TB x2
+- Node 4 staging disk if attached
 
 ### Cold Tier
 - removable 1TB HDDs
 - detached backup drives
 
 ### Offline / Recovery Tier
-- WD3200 desktop external
+- WD3200 external desktop HDD
 - rescue USB media
 
 ---
 
-## Unassigned Storage Recommended Uses
+## Recommended Additional Storage Uses
 
 | Asset | Recommended Use |
 |-------|-----------------|
-| HGST 1TB 7200RPM | Node 3 archive staging |
+| HGST 1TB 7200RPM | Node 4 staging / ingest workspace |
 | Seagate Mobile HDD 1TB | rotating cold backup |
-| KINGMAX 120GB SSD | spare / maintenance / scratch SSD |
-| WD portable ~1TB | shuttle backup / export disk |
-| WD3200 320GB | deep cold archive / emergency vault |
-| Schneider 16GB USB | rescue boot / admin toolkit |
+| KINGMAX 120GB SSD | scratch / logging / spare |
+| WD portable ~1TB | detachable shuttle backup |
+| WD3200 320GB | emergency frozen vault |
+| Schneider 16GB USB | rescue / bootstrap toolkit |
 
 ---
 
-## Phased Implementation Plan
+## Response Normalization Standard
 
-### Phase 1 — Stable Core Bring-up
-**Goal:** make the system work correctly on the core nodes first.
+All outputs from:
+- local LLM
+- external AI
+- external API
+- collectors
+- automation jobs
 
-**Primary arrangement**
-- Node 1 = AI compute
-- Node 5 = service plane
-- Node 2 = durable backup/archive
-- Node 3 = optional watchdog
-- Node 4 = not yet in critical flow
+must pass through a normalization layer before they are treated as canonical.
 
-**Tasks**
-1. Bring up FastAPI, Redis, and Qdrant on Node 5.
-2. Connect Node 5 to Node 1 for LLM requests.
-3. Store hot service state locally on Node 5 SSD.
-4. Send backups/snapshots to Node 2.
-5. Establish health checks and timeout handling.
+### Required Fields
+- task_id
+- source_type
+- task_type
+- summary_short
+- summary_long
+- key_points
+- actions
+- confidence_score
+- generated_by
+- normalized_at
+- needs_human_review
+- raw_payload_ref
 
-### Phase 2 — Reliability Hardening
-**Goal:** ensure restartability, backup validity, and degraded-mode behavior.
+---
 
-**Tasks**
-1. Add snapshot/export jobs from Node 5 to Node 2.
-2. Add model/config backup from Node 1 to Node 2.
-3. Run monitoring and verification jobs on Node 3.
-4. Add log rotation and retention policy.
-5. Test recovery from backup.
+## Threshold Envelope
 
-### Phase 3 — Edge Activation
-**Goal:** activate Node 4 without making it a critical dependency.
-
-**Tasks**
-1. Build a lightweight ingestion protocol.
-2. Route edge payloads into Node 5.
-3. Archive raw payloads to Node 2.
-4. Use Node 3 for integrity checks and staging workflows.
-
-### Phase 4 — Controlled Optimization
-**Goal:** increase throughput without increasing fragility.
-
-**Tasks**
-1. Introduce background queues.
-2. Limit concurrency on heavy services.
-3. Promote only verified storage into operational use.
-4. Use removable drives for offline recovery copies.
+| Resource | Soft Limit | Hard Limit | Action |
+|----------|-----------:|-----------:|--------|
+| Node 1 CPU | 65% | 80% | stop non-critical heavy jobs |
+| Node 1 RAM | 70% | 80% | reduce model concurrency |
+| Node 1 Disk | 70% | 80% | trim local PoC data |
+| Node 2 CPU | 60% | 80% | throttle workers |
+| Node 2 RAM | 65% | 80% | reduce caching / queue pressure |
+| Node 2 Disk | 70% | 80% | rotate logs, move snapshots to Node 3 |
+| Node 4 CPU | 50% | 70% | utility-only workloads |
+| Node 4 Disk | 70% | 80% | purge staging data |
+| Node 3 Disk | 75% | 85% | enforce archive retention |
 
 ---
 
 ## Trade-off Matrix
 
-| Option | Strength | Weakness | Recommendation |
-|--------|----------|----------|----------------|
-| Mac-only core | simple and fast to start | overload risk, poor separation | not preferred now |
-| NAS-centric | good durability | poor hot-path latency | not preferred for services |
-| Split core (Node 1 + Node 5 + Node 2) | balanced, reliable, scalable | more setup work than single-node | **recommended** |
-
----
-
-## Recommended Operating Policy
-
-1. **Node 5 is the service center.**
-2. **Node 1 is the AI brain.**
-3. **Node 2 is the memory and archive.**
-4. **Node 3 is the caretaker and watchdog.**
-5. **Node 4 is the external sensor/collector layer.**
+| Decision | Benefit | Cost | Acceptable? |
+|----------|---------|------|-------------|
+| PoC on Node 1 only | fastest validation | later migration work | Yes |
+| Move services to Node 2 later | stable always-on backend | more phased work | Yes |
+| Keep Node 3 storage-centric | durable and safe | not usable for hot DB path | Yes |
+| Use Node 4 as utility/staging | zero-waste helper role | limited compute ability | Yes |
+| Keep Node 5 non-critical | avoids fragile dependency | less aggressive edge automation | Yes |
+| Normalize all outputs | consistency and accuracy | extra implementation work | Required |
 
 ---
 
 ## Failure Policy
 
-### If Node 1 fails
-- Node 5 remains online
-- requests can queue, reject gracefully, or fall back to lighter logic
+### If Node 1 is offline
+- system remains alive on Node 2 after migration
+- high-complexity tasks are deferred
+- queue remains intact
 
-### If Node 2 fails temporarily
-- hot path continues on Node 1 / Node 5
-- backup lag is tolerated temporarily
+### If Node 2 fails
+- this is the most critical service-plane failure after migration
+- recovery priority is highest
 
 ### If Node 3 fails
-- monitoring and housekeeping reduce, but core services remain online
+- archive and backup lag increase temporarily
+- hot path may continue for a short period
 
 ### If Node 4 fails
-- ingestion capacity drops, but core remains online
+- monitoring and housekeeping reduce temporarily
 
 ### If Node 5 fails
-- this is the most critical service-plane failure
-- recovery priority is highest
-- snapshots and config backups must support rapid restore
+- source watching degrades but core operation remains alive
 
 ---
 
 ## Final Recommendation
-Use a **split-core architecture**:
+Start with a **small Docker-based PoC on Node 1** and validate the complete flow through **Kilo extension** first.
 
-- **Node 1:** AI compute
-- **Node 5:** live services and orchestration
-- **Node 2:** durable storage and backup
-- **Node 3:** utility reliability node
-- **Node 4:** edge ingestion only
+Only after that:
+- promote **Node 2** into the always-on service core,
+- use **Node 3** for durable storage and backup,
+- activate **Node 4** for watchdog/staging duties,
+- and use **Node 5** as optional edge watchers.
 
-This architecture best satisfies the system goals of:
-- zero-waste resource allocation
-- acceptable slowness
-- strong operational resilience
-- minimal unnecessary complexity
+This is the best current path under the real constraints:
+- zero-waste
+- threshold under 80%
+- slow but never down
+- scalable through Docker where appropriate
+- consistent normalized outputs.
