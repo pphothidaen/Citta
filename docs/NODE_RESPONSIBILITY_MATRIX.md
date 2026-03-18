@@ -1,41 +1,102 @@
 # Node Responsibility Matrix
 
 ## Purpose
-เอกสารนี้กำหนดหน้าที่ของแต่ละ node และ storage role ของระบบ Citta โดยยึดหลัก Zero-Waste, Slow-but-Never-Down และแยก compute / service / storage / edge ให้ชัดเจน
+This document defines the responsibility of each node under the current real resource baseline, starting with a small Docker-based PoC on Node 1 and then migrating services gradually in later phases.
 
-## Node Role Map
-| Node | Hardware | Primary Role | Secondary Role | Avoid Using For |
-|------|----------|--------------|----------------|-----------------|
-| Node 1 | MacBook Pro M4 + ADATA NVMe 2TB | Primary LLM / AI Compute | Dev, evaluation, model experimentation | Long-term archive, backup authority |
-| Node 2 | Synology DS224+ + Seagate Exos 8TB x2 | Durable NAS / backup / archive | Snapshot repository, log retention | Live low-latency DB path, heavy compute |
-| Node 3 | DIY J1900 NAS + 8GB RAM + Advantech mSATA 256GB | Utility / watchdog / backup verifier | Archive staging, relay jobs, low-power helper | Heavy AI inference, high-concurrency services |
-| Node 4 | Huawei Y9 2018 x2 | Edge ingestion / headless collectors | Remote/mobile capture endpoints | Orchestrator, durable storage, compute core |
-| Node 5 | Lenovo ThinkCentre M720q i5-8500T + 32GB RAM + SATA SSD 256GB | Main API / Redis / Qdrant / orchestration | Workers, semantic routing, validation | Long-term archive, removable backup storage |
+---
 
-## Storage Role Map
-| Storage | Assigned Role | Node |
-|---------|---------------|------|
-| ADATA NVMe 2TB | Hot AI workspace, model storage, local cache | Node 1 |
-| Seagate Exos 8TB x2 | Durable NAS storage, archive, snapshots, backups | Node 2 |
-| Advantech mSATA SSD 256GB | System disk for utility runtime | Node 3 |
-| Lenovo SATA SSD 256GB | Service disk for API, Redis, Qdrant | Node 5 |
-| HGST 1TB 7200RPM | Recommended archive staging disk | Node 3 (recommended) |
-| Seagate Mobile HDD 1TB | Rotating backup / cold copy | External / removable |
-| KINGMAX SMV32 120GB | Spare / maintenance / scratch SSD | Unassigned |
-| WD portable external ~1TB | Detachable shuttle backup | External / removable |
-| WD3200H1U-00 320GB | Deep cold archive / emergency vault | Offline |
-| Schneider USB flash 16GB | Rescue / recovery / admin toolkit | Admin |
+## Current Development Strategy
+1. Start with a small Docker-based PoC on Node 1.
+2. Validate the complete end-to-end flow through Kilo extension.
+3. Only after PoC stability is confirmed, begin phased migration to the long-term node roles.
 
-## Hot / Warm / Cold / Offline Mapping
-- Hot: Node 1 ADATA NVMe, Node 5 SATA SSD
-- Warm: Node 2 NAS storage, Node 3 staging if attached
-- Cold: removable HDD backup copies
-- Offline: WD3200 desktop external, rescue USB media
+---
 
-## Guiding Rules
-1. Node 1 handles heavy AI reasoning only.
-2. Node 5 handles live services and orchestration.
-3. Node 2 is the durability authority for backups and archives.
-4. Node 3 protects reliability through monitoring and housekeeping.
-5. Node 4 stays outside the critical path.
-6. Unassigned storage must be explicitly verified before promotion into production.
+## Node Role Matrix
+
+| Node | Primary Role | Secondary Role | Run in PoC? | Run in Phase 2+? | Avoid Using For |
+|------|--------------|----------------|-------------|------------------|-----------------|
+| Node 1 | Coding workstation + PoC all-in-one + premium AI compute | local testing / heavy reasoning / response shaping | Yes | Yes | always-on service center |
+| Node 2 | Always-on service core | API, Redis, Qdrant, workers, normalization | No | Yes | long-term archive, detached backup storage |
+| Node 3 | Durable archive / backup / snapshot authority | cold storage / export / historical outputs | No | Yes | live hot DB path |
+| Node 4 | Watchdog / utility / staging | health checks, retention jobs, checksum, log spool | Optional | Yes | heavy inference, high-concurrency apps |
+| Node 5 | Edge watcher / collector | background polling / source monitoring / feed capture | No | Optional | critical orchestration |
+| External Operator | Human interface | mobile status / commands / alerts | Optional | Yes | infrastructure execution core |
+
+---
+
+## What Each Node Should Run
+
+### Node 1
+- Docker-based PoC stack
+- FastAPI
+- Redis
+- Qdrant
+- mock ingestion / mock worker
+- normalization layer
+- LLM runtime for local testing
+- Kilo integration validation
+
+### Node 2
+- FastAPI
+- Redis
+- Qdrant
+- scheduler
+- queue consumers
+- normalization service
+- bot bridge
+- bounded log volumes
+
+### Node 3
+- backup target
+- snapshots
+- archive
+- exported reports
+- removable backup coordination
+
+### Node 4
+- watchdog services
+- health probes
+- retention jobs
+- rsync/checksum helpers
+- staging pipeline
+
+### Node 5
+- source watchers
+- lightweight collectors
+- polling jobs
+- raw feed submission
+
+---
+
+## Docker Suitability
+
+| Node | Docker-first? | Notes |
+|------|---------------|------|
+| Node 1 | Yes for PoC stack | local LLM runtime may be native if more stable |
+| Node 2 | Yes | main service host in future phases |
+| Node 3 | Selective | use native NAS features where better suited |
+| Node 4 | Yes | ideal for lightweight utility containers |
+| Node 5 | Limited | Android constraints |
+
+---
+
+## Threshold Policy
+
+| Node | CPU Soft / Hard | RAM Soft / Hard | Disk Soft / Hard |
+|------|------------------|------------------|------------------|
+| Node 1 | 65% / 80% | 70% / 80% | 70% / 80% |
+| Node 2 | 60% / 80% | 65% / 80% | 70% / 80% |
+| Node 3 | storage-centric | storage-centric | 75% / 85% |
+| Node 4 | 50% / 70% | 60% / 75% | 70% / 80% |
+| Node 5 | stability-first | stability-first | low local retention only |
+
+---
+
+## Core Operating Rules
+1. Node 1 is the first PoC node and the primary coding workstation.
+2. Node 2 becomes the always-on service center after PoC succeeds.
+3. Node 3 remains the durable storage authority.
+4. Node 4 supports reliability, staging, and housekeeping.
+5. Node 5 remains outside the critical path.
+6. All outputs from local AI and external AI/API must pass through a normalization layer before being treated as canonical results.
