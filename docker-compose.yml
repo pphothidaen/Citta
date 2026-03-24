@@ -1,0 +1,19 @@
+# docker-compose.yml
+version: '3.8'
+
+services:
+  gateway-proxy:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: orchestrator_proxy_node1
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'        # จำกัดการใช้ CPU สูงสุดที่ 1 Core
+          memory: 256M       # จำกัด RAM สูงสุดที่ 256MB สำหรับ Proxy น้ำหนักเบา
