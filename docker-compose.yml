@@ -1,4 +1,4 @@
-# docker-compose.yml
+# docker-compose.yml - Citta POC with external drive volumes
 version: '3.8'
 
 services:
@@ -12,8 +12,10 @@ services:
     env_file:
       - .env
     restart: unless-stopped
+    volumes:
+      - /Volumes/Citta_SSD_120GB:/data/ssd1
     deploy:
       resources:
         limits:
-          cpus: '1.0'        # จำกัดการใช้ CPU สูงสุดที่ 1 Core
-          memory: 256M       # จำกัด RAM สูงสุดที่ 256MB สำหรับ Proxy น้ำหนักเบา
+          cpus: '1.0'
+          memory: 256M
