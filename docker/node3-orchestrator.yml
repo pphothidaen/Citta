@@ -1,0 +1,82 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Node 3 — Active Orchestrator
+# Hardware : Mac M4 Pro (secondary process) or dedicated Ubuntu server
+# Role     : Hybrid Translation Router, Context Minification, Semantic Cache S0
+# Flow     : Client → Watchdog (DNS) → Orchestrator → Cache check
+#            Cache hit  → return <10ms, $0 cost
+#            Cache miss → Context Minify → route to Node 1 (local) or External
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  # ── Semantic Cache Layer — S0 (Redis Stack with vector search) ────────────
+  semantic-cache:
+    image: redis/redis-stack:latest
+    container_name: citta_semantic_cache_node3
+    ports:
+      - "6380:6379"   # Redis
+      - "8443:8001"   # RedisInsight UI
+    volumes:
+      - semantic_cache_vol:/data
+    environment:
+      - REDIS_ARGS=--requirepass ${REDIS_AUTH}
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+
+  # ── Cognitive Memory Layer (Semantic Cache S0 embedding service) ──────────
+  memory-layer:
+    image: ghcr.io/chroma-core/chroma:latest
+    container_name: citta_memory_node3
+    ports:
+      - "8100:8000"
+    volumes:
+      - memory_vol:/chroma/chroma
+    environment:
+      - IS_PERSISTENT=TRUE
+      - ANONYMIZED_TELEMETRY=FALSE
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+
+  # ── Hybrid Translation Router (Context Minification & Routing) ────────────
+  orchestrator:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: citta_orchestrator_node3
+    ports:
+      - "8001:8000"
+    env_file:
+      - ../.env
+    environment:
+      - REDIS_URL=redis://:${REDIS_AUTH}@semantic-cache:6379
+      - QDRANT_URL=http://node2:6333          # Node 2 vector fabric
+      - NODE1_URL=http://node1:8000           # Node 1 neural core
+      - CHROMA_URL=http://memory-layer:8000
+      - ENABLE_SEMANTIC_CACHE=true
+      - CACHE_SIMILARITY_THRESHOLD=0.92
+      - CONTEXT_MINIFICATION=true
+    depends_on:
+      - semantic-cache
+      - memory-layer
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 1G
+
+volumes:
+  semantic_cache_vol:
+  memory_vol:
+
+networks:
+  default:
+    name: citta_node3_net

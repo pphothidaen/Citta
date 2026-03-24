@@ -1,0 +1,83 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Node 4 — Adaptive Ingress Swarm
+# Hardware : Low-power devices (Alpine Linux, Raspberry Pi, VPS)
+# Role     : Distributed Edge Workers — web intelligence scraping, async ingest
+#            Dynamic Evasion & Auto-VPN for anti-blocking
+# Pipeline : Scrape → Async Ingest → Node 3 Memory Layer → Node 2 Vector Fabric
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  # ── Edge Worker 1 (Alpine — zero-waste base) ──────────────────────────────
+  edge-worker-1:
+    image: python:3.11-alpine
+    container_name: citta_edge1_node4
+    working_dir: /worker
+    volumes:
+      - /mnt/citta_ssd2/edge1:/worker/data
+    environment:
+      - WORKER_ID=edge-1
+      - INGEST_URL=http://node3:8001/v1/ingest
+      - REDIS_URL=redis://:${REDIS_AUTH}@node2:6379
+    command: >
+      sh -c "
+        pip install --no-cache-dir scrapy redis httpx &&
+        echo 'Edge Worker 1 ready' &&
+        tail -f /dev/null
+      "
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 128M
+
+  # ── Edge Worker 2 (Alpine — parallel scraper) ─────────────────────────────
+  edge-worker-2:
+    image: python:3.11-alpine
+    container_name: citta_edge2_node4
+    working_dir: /worker
+    volumes:
+      - /mnt/citta_ssd2/edge2:/worker/data
+    environment:
+      - WORKER_ID=edge-2
+      - INGEST_URL=http://node3:8001/v1/ingest
+      - REDIS_URL=redis://:${REDIS_AUTH}@node2:6379
+    command: >
+      sh -c "
+        pip install --no-cache-dir scrapy redis httpx &&
+        echo 'Edge Worker 2 ready' &&
+        tail -f /dev/null
+      "
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 128M
+
+  # ── Redis Queue Consumer (async ingest pipeline listener) ─────────────────
+  queue-consumer:
+    image: python:3.11-alpine
+    container_name: citta_queue_consumer_node4
+    working_dir: /consumer
+    environment:
+      - REDIS_URL=redis://:${REDIS_AUTH}@node2:6379
+      - INGEST_QUEUE=citta:ingest
+      - NODE3_URL=http://node3:8001
+    command: >
+      sh -c "
+        pip install --no-cache-dir redis httpx &&
+        echo 'Queue Consumer ready' &&
+        tail -f /dev/null
+      "
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '0.25'
+          memory: 64M
+
+networks:
+  default:
+    name: citta_node4_net
