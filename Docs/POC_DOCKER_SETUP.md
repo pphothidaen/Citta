@@ -1,10 +1,10 @@
-# Citta PoC Docker Setup
+# CittaProject PoC Docker Setup
 
 This document turns the architecture plan into a runnable proof of concept.
 
 ## Goal
 
-Run each logical Citta node as a separate Docker Compose project so you can validate:
+Run each logical CittaProject node as a separate Docker Compose project so you can validate:
 
 - Node 1 can serve local and upstream model traffic.
 - Node 2 can provide Redis, Qdrant, and watchdog services.
@@ -38,7 +38,7 @@ curl http://localhost:8000/health
 That starts:
 
 - Ollama on port `11434`
-- Citta gateway on port `8000`
+- CittaProject gateway on port `8000`
 
 ## 3. Multi-Node PoC Bring-Up Order
 

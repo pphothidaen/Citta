@@ -1,7 +1,7 @@
 # Hardware & Storage Asset Register
 
 ## Purpose
-This document records the latest real hardware and storage resources used by Citta as the baseline for the Node 1 small Docker PoC, phased migration, and real development.
+This document records the latest real hardware and storage resources used by CittaProject as the baseline for the Node 1 small Docker PoC, phased migration, and real development.
 
 ---
 
