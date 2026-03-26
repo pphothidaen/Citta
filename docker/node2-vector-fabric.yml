@@ -1,35 +1,19 @@
-# ─────────────────────────────────────────────────────────────────────────────
-# Node 2 — Persistent Vector Fabric
-# Hardware : Synology DS224+ NAS  (Ubuntu / DSM Docker)
-# Role     : Long-term memory, vector search, message broker, swarm watchdog
-# Storage  : /mnt/citta_hdd1  (ext4, primary HDD)
-#            /mnt/citta_hdd2  (ext4, secondary HDD — mirror/backup)
-# ─────────────────────────────────────────────────────────────────────────────
-
 services:
-
-  # ── Redis Message Broker (async queue between nodes) ──────────────────────
   redis-broker:
     image: redis:7-alpine
     container_name: citta_redis_node2
     ports:
       - "6379:6379"
     volumes:
-      - /mnt/citta_hdd1/redis:/data
+      - redis_data:/data
     command: >
       redis-server
       --appendonly yes
-      --requirepass ${REDIS_AUTH}
+      --requirepass ${REDIS_AUTH:-change-me}
       --maxmemory 512mb
       --maxmemory-policy allkeys-lru
     restart: unless-stopped
-    deploy:
-      resources:
-        limits:
-          cpus: '0.5'
-          memory: 512M
 
-  # ── Vector Lake (Qdrant — TTL & Quantization) ─────────────────────────────
   qdrant:
     image: qdrant/qdrant:latest
     container_name: citta_qdrant_node2
@@ -37,30 +21,24 @@ services:
       - "6333:6333"   # REST API
       - "6334:6334"   # gRPC
     volumes:
-      - /mnt/citta_hdd1/qdrant:/qdrant/storage
+      - qdrant_data:/qdrant/storage
     environment:
-      - QDRANT__SERVICE__GRPC_PORT=6334
+      QDRANT__SERVICE__GRPC_PORT: 6334
     restart: unless-stopped
-    deploy:
-      resources:
-        limits:
-          cpus: '1.0'
-          memory: 1G
 
-  # ── Swarm Watchdog (Auto-Heal Controller) ─────────────────────────────────
   watchdog:
     image: louislam/uptime-kuma:1
     container_name: citta_watchdog_node2
     ports:
       - "3001:3001"
     volumes:
-      - /mnt/citta_hdd1/watchdog:/app/data
+      - watchdog_data:/app/data
     restart: unless-stopped
-    deploy:
-      resources:
-        limits:
-          cpus: '0.25'
-          memory: 256M
+
+volumes:
+  redis_data:
+  qdrant_data:
+  watchdog_data:
 
 networks:
   default:

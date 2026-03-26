@@ -1,0 +1,8 @@
+{
+    "chat.tools.terminal.autoApprove": {
+        "true": true,
+        "pgrep": true,
+        "diskutil": true,
+        "tee": true
+    }
+}

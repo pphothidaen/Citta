@@ -1,28 +1,13 @@
-# ─────────────────────────────────────────────────────────────────────────────
-# Node 1 — Dedicated Neural Core
-# Hardware : Mac M4 Pro (Apple Silicon)
-# Role     : Local hardware-accelerated inference + OpenAI-compatible proxy
-# Storage  : /Volumes/Citta_SSD_120GB  (APFS, 120 GB external SSD)
-# ─────────────────────────────────────────────────────────────────────────────
-
 services:
-
-  # ── Local LLM Inference Engine (Ollama — hardware accelerated on M4) ───────
   ollama:
-    image: ollama/ollama
+    image: ollama/ollama:latest
     container_name: citta_ollama_node1
     ports:
       - "11434:11434"
     volumes:
-      - /Volumes/Citta_SSD_120GB/ollama:/root/.ollama   # model weights on SSD
+      - ollama_data:/root/.ollama
     restart: unless-stopped
-    deploy:
-      resources:
-        limits:
-          cpus: '4.0'
-          memory: 8G
 
-  # ── Citta Proxy Gateway (Prompt Firewall + LiteLLM Router) ────────────────
   gateway-proxy:
     build:
       context: ..
@@ -33,17 +18,17 @@ services:
     env_file:
       - ../.env
     environment:
-      - OLLAMA_BASE_URL=http://ollama:11434
+      CITTA_SERVICE_NAME: gateway-proxy
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
     volumes:
-      - /Volumes/Citta_SSD_120GB/proxy_logs:/app/logs
+      - proxy_logs:/app/logs
     depends_on:
       - ollama
     restart: unless-stopped
-    deploy:
-      resources:
-        limits:
-          cpus: '1.0'
-          memory: 512M
+
+volumes:
+  ollama_data:
+  proxy_logs:
 
 networks:
   default:
