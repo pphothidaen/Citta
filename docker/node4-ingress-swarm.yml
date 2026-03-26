@@ -1,0 +1,52 @@
+services:
+  edge-worker-1:
+    build:
+      context: ..
+      dockerfile: docker/node4/Dockerfile
+    container_name: citta_edge1_node4
+    command: ["python", "edge_worker.py"]
+    volumes:
+      - edge_worker_1_state:/app/state
+    environment:
+      WORKER_ID: edge-1
+      REDIS_URL: ${NODE2_REDIS_URL:-redis://:${REDIS_AUTH:-change-me}@node2.local:6379/0}
+      INGEST_QUEUE: ${INGEST_QUEUE:-citta:ingest}
+      EDGE_SOURCE_URL: ${EDGE_SOURCE_URL:-https://example.com}
+      POLL_INTERVAL_SECONDS: ${POLL_INTERVAL_SECONDS:-60}
+    restart: unless-stopped
+
+  edge-worker-2:
+    build:
+      context: ..
+      dockerfile: docker/node4/Dockerfile
+    container_name: citta_edge2_node4
+    command: ["python", "edge_worker.py"]
+    volumes:
+      - edge_worker_2_state:/app/state
+    environment:
+      WORKER_ID: edge-2
+      REDIS_URL: ${NODE2_REDIS_URL:-redis://:${REDIS_AUTH:-change-me}@node2.local:6379/0}
+      INGEST_QUEUE: ${INGEST_QUEUE:-citta:ingest}
+      EDGE_SOURCE_URL: ${EDGE_SOURCE_URL:-https://example.com}
+      POLL_INTERVAL_SECONDS: ${POLL_INTERVAL_SECONDS:-60}
+    restart: unless-stopped
+
+  queue-consumer:
+    build:
+      context: ..
+      dockerfile: docker/node4/Dockerfile
+    container_name: citta_queue_consumer_node4
+    command: ["python", "queue_consumer.py"]
+    environment:
+      REDIS_URL: ${NODE2_REDIS_URL:-redis://:${REDIS_AUTH:-change-me}@node2.local:6379/0}
+      INGEST_QUEUE: ${INGEST_QUEUE:-citta:ingest}
+      NODE3_INGEST_URL: ${NODE3_INGEST_URL:-http://node3.local:8001/v1/ingest}
+    restart: unless-stopped
+
+volumes:
+  edge_worker_1_state:
+  edge_worker_2_state:
+
+networks:
+  default:
+    name: citta_node4_net

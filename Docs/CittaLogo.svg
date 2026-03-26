@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="500" height="500">
+    <!-- Background: Dark Navy/Black -->
+    <circle cx="50" cy="50" r="50" fill="#0B1120" />
+    
+    <!-- Icon: Citta Ensō + Neural Core (Clean White Lines) -->
+    <!-- Outer C / Ensō ring representing Stream of Consciousness -->
+    <path d="M 50 15 A 35 35 0 1 1 20 68" fill="none" stroke="#FFFFFF" stroke-width="6" stroke-linecap="round" />
+    
+    <!-- Inner Neural Dot / Zero Waste Core -->
+    <circle cx="35" cy="35" r="7" fill="#FFFFFF" />
+    
+    <!-- Connection line linking the core to the cycle -->
+    <path d="M 40 40 L 55 55" fill="none" stroke="#FFFFFF" stroke-width="5" stroke-linecap="round" />
+    
+    <!-- Outer Small Node -->
+    <circle cx="60" cy="60" r="4" fill="#FFFFFF" />
+</svg>

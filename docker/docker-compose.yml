@@ -1,0 +1,82 @@
+# Citta - Phase 1: Local Simulation
+# Optimized for Apple Silicon (M4) Unified Memory Architecture
+# Run: docker compose -f docker/docker-compose.yml up -d
+
+services:
+
+  # ─────────────────────────────────────────────
+  # MinIO – Object Storage (Unstructured Data Lake)
+  # Replaces AWS S3; stores raw Scraper output from Node 4
+  # ─────────────────────────────────────────────
+  minio:
+    image: quay.io/minio/minio:latest
+    platform: linux/arm64          # Native ARM64 for Apple Silicon (M4)
+    container_name: citta-minio
+    hostname: minio                # Virtual hostname – never use hardcoded IPs
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    ports:
+      - "${MINIO_API_PORT:-9000}:9000"      # S3-compatible API
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"  # Web console
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+    networks:
+      - citta-net
+
+  # ─────────────────────────────────────────────
+  # ChromaDB – Vector Database (Perception / Long-Term Memory)
+  # Stores embeddings for RAG; queried by Local LLM on Mac M4
+  # ─────────────────────────────────────────────
+  chromadb:
+    image: chromadb/chroma:latest
+    platform: linux/arm64          # Native ARM64 for Apple Silicon (M4)
+    container_name: citta-chromadb
+    hostname: chromadb             # Virtual hostname – never use hardcoded IPs
+    restart: unless-stopped
+    environment:
+      CHROMA_SERVER_AUTH_CREDENTIALS_PROVIDER: ${CHROMA_AUTH_PROVIDER:-chromadb.auth.token.TokenConfigServerAuthCredentialsProvider}
+      CHROMA_SERVER_AUTH_CREDENTIALS: ${CHROMA_AUTH_TOKEN}
+      CHROMA_SERVER_AUTH_PROVIDER: ${CHROMA_AUTH_PROVIDER:-chromadb.auth.token.TokenAuthServerProvider}
+      IS_PERSISTENT: "TRUE"
+      PERSIST_DIRECTORY: /chroma/data
+      ANONYMIZED_TELEMETRY: "FALSE"
+    ports:
+      - "${CHROMA_PORT:-8000}:8000"
+    volumes:
+      - chroma_data:/chroma/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/heartbeat"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+    networks:
+      - citta-net
+
+# ─────────────────────────────────────────────
+# Named Volumes – Persist data between container restarts
+# ─────────────────────────────────────────────
+volumes:
+  minio_data:
+    driver: local
+  chroma_data:
+    driver: local
+
+# ─────────────────────────────────────────────
+# Internal Network
+# Phase 2: swap this network for a LAN 1Gbps bridge to Synology
+# by changing only the .env / config – zero Business Logic changes needed
+# ─────────────────────────────────────────────
+networks:
+  citta-net:
+    driver: bridge
+    name: citta-net
