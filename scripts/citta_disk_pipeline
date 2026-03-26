@@ -1,0 +1,621 @@
+#!/bin/bash
+# =============================================================================
+# citta_disk_pipeline — Unified dynamic disk preparation & monitoring script
+# =============================================================================
+# Usage:
+#   sudo bash citta_disk_pipeline [OPTIONS] [DISK]
+#
+# Options:
+#   --disk DISK       Target disk (e.g. /dev/disk4). Default: interactive menu
+#                     (auto if only one external disk found).
+#   --label LABEL     Filesystem label. Default: citta_data
+#   --min-bytes N     Minimum expected disk size in bytes. Default: 900000000000
+#   --status          Show current scan status and exit (no sudo needed)
+#   --watch-only      Start watcher/monitor without re-running the pipeline
+#   --force           Re-run pipeline even if DONE marker is present
+#   --help            Show this help
+#
+# Examples:
+#   sudo bash citta_disk_pipeline                     # show disk menu / auto if one disk
+#   sudo bash citta_disk_pipeline --disk /dev/disk5   # specific disk, skip menu
+#   bash citta_disk_pipeline --status                 # check all disks status (no sudo)
+#   sudo bash citta_disk_pipeline --watch-only        # only monitor (disk menu shown)
+#   sudo bash citta_disk_pipeline --disk /dev/diskX   # auto disk, skip menu
+# =============================================================================
+
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# Defaults (overridable via flags)
+# ---------------------------------------------------------------------------
+DISK=""
+LABEL="citta_data"
+EXPECTED_MIN_BYTES=900000000000
+MODE="run"        # run | status | watch-only
+FORCE_RERUN=0
+
+BADBLOCKS_BIN="/opt/homebrew/opt/e2fsprogs/sbin/badblocks"
+MKFS_BIN="/opt/homebrew/opt/e2fsprogs/sbin/mkfs.ext4"
+DUMPE2FS_BIN="/opt/homebrew/opt/e2fsprogs/sbin/dumpe2fs"
+BADBLOCKS_BLOCK_SIZE=1024
+MKFS_BLOCK_SIZE=4096
+STALL_SKIP_BLOCKS=1048576    # 1 GB in 1 KB blocks; doubles each repeat stall
+STALL_REPEAT_THRESHOLD=3
+STALL_SECONDS=180
+CHECK_EVERY_SECONDS=30
+STATUS_INTERVAL=600          # periodic macOS notification interval (seconds, default 10 min)
+
+REPORT_DIR="$HOME/citta_drive_reports"
+SUDO_KEEPALIVE_PID=""
+WATCHER_PID=""
+STATUS_PID=""
+
+# ---------------------------------------------------------------------------
+# Argument parsing
+# ---------------------------------------------------------------------------
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --disk)        DISK="$2";            shift 2 ;;
+    --label)       LABEL="$2";           shift 2 ;;
+    --min-bytes)   EXPECTED_MIN_BYTES="$2"; shift 2 ;;
+    --status)      MODE="status";        shift ;;
+    --watch-only)  MODE="watch-only";    shift ;;
+    --force)       FORCE_RERUN=1;        shift ;;
+    --help|-h)     sed -n '3,30p' "$0"; exit 0 ;;
+    /dev/disk*)    DISK="$1";            shift ;;
+    *)  echo "Unknown option: $1"; sed -n '3,30p' "$0"; exit 1 ;;
+  esac
+done
+
+mkdir -p "$REPORT_DIR"
+
+# ---------------------------------------------------------------------------
+# Helpers: notification, logging
+# ---------------------------------------------------------------------------
+notify() {
+  local title="${2:-disk monitor}"
+  command -v osascript >/dev/null 2>&1 &&
+    osascript -e "display notification \"$1\" with title \"$title\"" >/dev/null 2>&1 || true
+}
+
+log() {
+  local logfile="$1"; shift
+  echo "[$(date)] $*" | tee -a "$logfile"
+}
+
+# ---------------------------------------------------------------------------
+# Interactive disk selection (auto if only one disk found)
+# ---------------------------------------------------------------------------
+select_disk() {
+  local devs=()
+  while IFS= read -r dev; do
+    [[ -n "$dev" ]] || continue
+    devs+=("$dev")
+  done < <(diskutil list external physical \
+    | awk '/^\/dev\/disk[0-9]+/ {sub(":$","",$1); print $1}' | sort -V)
+
+  if [[ ${#devs[@]} -eq 0 ]]; then
+    echo "[ERROR] No external physical disks found." >&2
+    echo ""; return
+  fi
+
+  # Single disk — auto-proceed
+  if [[ ${#devs[@]} -eq 1 ]]; then
+    local dev="${devs[0]}"
+    local disk_id; disk_id="$(basename "$dev")"
+    local mkfs_log="$REPORT_DIR/mkfs_${disk_id}_kimhome.txt"
+    if [[ "$FORCE_RERUN" != "1" ]] && grep -qE "DONE ${disk_id}" "$mkfs_log" 2>/dev/null; then
+      echo "[INFO] Only disk found ($dev) is already DONE. Use --force to re-run." >&2
+      echo ""; return
+    fi
+    echo "[INFO] One disk found: $dev — auto-selected." >&2
+    echo "$dev"; return
+  fi
+
+  # Multiple disks — show numbered menu
+  echo "" >&2
+  echo "External disks available:" >&2
+  echo "" >&2
+  local i=1
+  for dev in "${devs[@]}"; do
+    local disk_id; disk_id="$(basename "$dev")"
+    local media_name size done_tag=""
+    media_name=$(diskutil info "$dev" 2>/dev/null \
+      | awk -F': ' '/Device \/ Media Name/{print $2}' | xargs || echo "Unknown")
+    size=$(diskutil info "$dev" 2>/dev/null \
+      | awk -F': ' '/Disk Size/{print $2}' | cut -d'(' -f1 | xargs || echo "")
+    local mkfs_log="$REPORT_DIR/mkfs_${disk_id}_kimhome.txt"
+    grep -qE "DONE ${disk_id}" "$mkfs_log" 2>/dev/null && done_tag=" [DONE]"
+    printf "  [%d] %s  %s  %s%s\n" "$i" "$dev" "$media_name" "$size" "$done_tag" >&2
+    (( i++ ))
+  done
+  echo "  [0] Cancel" >&2
+  echo "" >&2
+
+  local choice
+  while true; do
+    read -rp "Select disk [1-${#devs[@]}]: " choice </dev/tty
+    if [[ "$choice" == "0" ]]; then
+      echo ""; return
+    fi
+    if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#devs[@]} )); then
+      local selected="${devs[$((choice-1))]}"
+      local sel_id; sel_id="$(basename "$selected")"
+      local sel_mkfs="$REPORT_DIR/mkfs_${sel_id}_kimhome.txt"
+      if [[ "$FORCE_RERUN" != "1" ]] && grep -qE "DONE ${sel_id}" "$sel_mkfs" 2>/dev/null; then
+        echo "[WARN] $selected is already DONE. Use --force to re-run, or choose another disk." >&2
+        continue
+      fi
+      echo "$selected"; return
+    fi
+    echo "  Invalid choice. Enter a number between 1 and ${#devs[@]}." >&2
+  done
+}
+
+# ---------------------------------------------------------------------------
+# Status-only mode (no sudo required)
+# ---------------------------------------------------------------------------
+show_status() {
+  echo "=========================================="
+  echo " disk citta pipeline — status"
+  echo "=========================================="
+
+  # Scan active processes
+  if pgrep -l badblocks >/dev/null 2>&1; then
+    echo "  badblocks:   RUNNING"
+  else
+    echo "  badblocks:   not running"
+  fi
+  if pgrep -fl "citta_disk_pipeline|watch_disk4_until_done" >/dev/null 2>&1; then
+    echo "  watcher:     RUNNING"
+  else
+    echo "  watcher:     not running"
+  fi
+
+  # Per-disk status
+  for log_file in "$REPORT_DIR"/badblocks_*_kimhome.txt; do
+    [[ -f "$log_file" ]] || continue
+    local did
+    did=$(basename "$log_file" | sed 's/badblocks_//;s/_kimhome.txt//')
+    local pct
+    pct=$(strings "$log_file" 2>/dev/null | grep -Eo '[0-9]+\.[0-9]+% done' | tail -n 1 || echo "N/A")
+    local mkfs_log="$REPORT_DIR/mkfs_${did}_kimhome.txt"
+    if grep -qE "DONE ${did}" "$mkfs_log" 2>/dev/null; then
+      echo "  $did:  DONE (mkfs complete)"
+    else
+      echo "  $did:  $pct"
+    fi
+  done
+
+  # Master bad-block summary
+  for master in "$REPORT_DIR"/badblocks_*_kimhome.master.list; do
+    [[ -f "$master" ]] || continue
+    local count
+    count=$(wc -l < "$master" | tr -d ' ')
+    echo "  $(basename "$master"): ${count} bad blocks recorded"
+  done
+  echo "=========================================="
+}
+
+# ---------------------------------------------------------------------------
+# Sudo keepalive (spawns background loop refreshing credentials every 50s)
+# ---------------------------------------------------------------------------
+ensure_sudo_session() {
+  if ! sudo -n true 2>/dev/null; then
+    if [[ -t 0 ]]; then
+      echo "[INFO] sudo credentials required."
+      sudo -v
+    else
+      echo "[ERROR] No terminal for sudo. Run 'sudo -v' first." >&2
+      return 1
+    fi
+  fi
+  ( while true; do sudo -n true >/dev/null 2>&1 || exit; sleep 50; done ) >/dev/null 2>&1 &
+  SUDO_KEEPALIVE_PID=$!
+}
+
+# ---------------------------------------------------------------------------
+# File names derived from disk id
+# ---------------------------------------------------------------------------
+set_file_vars() {
+  local disk_id
+  disk_id="$(basename "$DISK")"
+  BBMASTER="$REPORT_DIR/badblocks_${disk_id}_kimhome.master.list"
+  BBLIST="$REPORT_DIR/badblocks_${disk_id}_kimhome.list"
+  BBINPUT="$REPORT_DIR/badblocks_${disk_id}_kimhome.input.list"
+  BBNEW="$REPORT_DIR/badblocks_${disk_id}_kimhome.new.list"
+  BBMKFSLIST="$REPORT_DIR/badblocks_${disk_id}_kimhome.mkfs.list"
+  BBLOG="$REPORT_DIR/badblocks_${disk_id}_kimhome.txt"
+  SMARTLOG="$REPORT_DIR/smart_${disk_id}_kimhome.txt"
+  MKFSLOG="$REPORT_DIR/mkfs_${disk_id}_kimhome.txt"
+  WATCHLOG="$REPORT_DIR/watch_${disk_id}.log"
+  STALL_STATE="$REPORT_DIR/badblocks_${disk_id}_kimhome.stall_state"
+  STALLED_PROGRESS_FILE="$REPORT_DIR/badblocks_${disk_id}_kimhome.stalled_progress"
+  MILESTONE_STATE="$REPORT_DIR/watch_${disk_id}_last_milestone.txt"
+  LAST_PROGRESS_STATE="$REPORT_DIR/watch_${disk_id}_last_progress.txt"
+  DONE_MARKER="=== DONE $(basename "$DISK")"
+}
+
+# ---------------------------------------------------------------------------
+# Bad-block list helpers
+# ---------------------------------------------------------------------------
+bbmaster_merge() {
+  cat "$@" 2>/dev/null \
+    | awk 'NF { printf "%.0f\n", $1 }' \
+    | sort -n -u > "$BBMASTER"
+  cp "$BBMASTER" "$BBLIST"
+}
+
+bbmaster_complete() {
+  [[ -f "$BBMASTER" ]] && grep -q "Badblocks scan complete." "$BBLOG" 2>/dev/null
+}
+
+bb_last_block() {
+  local size_bytes
+  size_bytes=$(diskutil info "$DISK" | sed -nE 's/.*\(([0-9]+) Bytes\).*/\1/p' | head -n 1)
+  echo $(( size_bytes / BADBLOCKS_BLOCK_SIZE - 1 ))
+}
+
+stalled_pct() {
+  if [[ -f "$STALLED_PROGRESS_FILE" ]]; then
+    cat "$STALLED_PROGRESS_FILE" 2>/dev/null || true
+    return
+  fi
+  strings "$BBLOG" 2>/dev/null \
+    | grep -Eo '[0-9]+\.[0-9]+% done' \
+    | tail -n 120 | sort | uniq -c | sort -nr \
+    | awk -v t="$STALL_REPEAT_THRESHOLD" '$1 >= t { print $2; exit }'
+}
+
+resume_first_block() {
+  local stalled percent last_block progress_block candidate pkey prior skip
+  stalled=$(stalled_pct)
+  last_block=$(bb_last_block)
+  percent=$(echo "$stalled" | sed -nE 's/^([0-9]+\.[0-9]+)% done$/\1/p')
+  pkey=$(echo "$percent" | tr '.' '_')
+  prior=0
+  if [[ -f "$STALL_STATE" ]]; then
+    prior=$(awk -F'|' -v k="$pkey" '$1==k{print $2}' "$STALL_STATE" | tail -n 1)
+    prior=${prior:-0}
+  fi
+  skip=$(( STALL_SKIP_BLOCKS << prior ))
+  progress_block=$(awk -v p="$percent" -v l="$last_block" 'BEGIN{printf "%d",int((p/100)*l)}')
+  candidate=$(( progress_block + skip ))
+  local last_bad
+  last_bad=$(tail -n 1 "$BBMASTER" 2>/dev/null || echo 0)
+  if (( candidate <= last_bad )); then candidate=$(( last_bad + skip )); fi
+  if (( candidate > last_block ));  then candidate=$last_block; fi
+  echo "$pkey|$((prior + 1))" > "$STALL_STATE"
+  echo "$candidate"
+}
+
+run_bb_resume_past_stall() {
+  local last_block resume_block skip_from skip_to spct sblock
+  last_block=$(bb_last_block)
+  resume_block=$(resume_first_block)
+  spct=$(stalled_pct | sed -nE 's/^([0-9]+\.[0-9]+)% done$/\1/p')
+  sblock=$(awk -v p="$spct" -v l="$last_block" 'BEGIN{printf "%d",int((p/100)*l)}')
+  skip_from=$sblock
+  skip_to=$(( resume_block - 1 ))
+
+  cp "$BBMASTER" "$BBINPUT"
+  if (( skip_to >= skip_from )); then
+    log "$BBLOG" "Detected stall near $(stalled_pct); marking blocks ${skip_from}-${skip_to} bad; resuming at ${resume_block}."
+    awk -v f="$skip_from" -v t="$skip_to" 'BEGIN{for(b=f;b<=t;b++)print b}' >> "$BBINPUT"
+  else
+    log "$BBLOG" "Detected stall near $(stalled_pct); resuming at ${resume_block}."
+  fi
+  awk 'NF{printf "%.0f\n",$1}' "$BBINPUT" | sort -n -u > "${BBINPUT}.tmp"
+  mv "${BBINPUT}.tmp" "$BBINPUT"
+  rm -f "$BBNEW"
+  sudo "$BADBLOCKS_BIN" -b "$BADBLOCKS_BLOCK_SIZE" -sv \
+    -i "$BBINPUT" -o "$BBNEW" "$DISK" "$last_block" "$resume_block" 2>&1 | tee -a "$BBLOG"
+  bbmaster_merge "$BBINPUT" "$BBNEW"
+}
+
+mkfs_bb_list() {
+  if [[ ! -f "$BBMASTER" ]]; then : > "$BBMKFSLIST"; return; fi
+  if (( BADBLOCKS_BLOCK_SIZE == MKFS_BLOCK_SIZE )); then
+    cp "$BBMASTER" "$BBMKFSLIST"; return
+  fi
+  awk -v r=$(( MKFS_BLOCK_SIZE / BADBLOCKS_BLOCK_SIZE )) \
+    '{print int($1/r)}' "$BBMASTER" | sort -n -u > "$BBMKFSLIST"
+}
+
+# ---------------------------------------------------------------------------
+# Full disk pipeline
+# ---------------------------------------------------------------------------
+run_pipeline() {
+  local disk_id
+  disk_id="$(basename "$DISK")"
+
+  log "$BBLOG" "=== START ${disk_id} pipeline ==="
+
+  # Preflight
+  if ! diskutil info "$DISK" >/dev/null 2>&1; then
+    log "$BBLOG" "ERROR: $DISK not found. Aborting."; exit 1
+  fi
+  local size_bytes
+  size_bytes=$(diskutil info "$DISK" | sed -nE 's/.*\(([0-9]+) Bytes\).*/\1/p' | head -n 1)
+  if [[ -z "$size_bytes" ]]; then
+    log "$BBLOG" "ERROR: cannot read disk size. Aborting."; exit 1
+  fi
+  if (( size_bytes < EXPECTED_MIN_BYTES )); then
+    log "$BBLOG" "ERROR: disk too small (${size_bytes} B < ${EXPECTED_MIN_BYTES} B). Aborting."; exit 1
+  fi
+  diskutil info "$DISK" \
+    | grep -E 'Device Identifier|Device / Media Name|Disk Size|Protocol|Device Location' \
+    | tee -a "$BBLOG"
+
+  # Unmount
+  log "$BBLOG" "Unmounting $DISK..."
+  sudo diskutil unmountDisk force "$DISK" 2>&1 | tee -a "$BBLOG" || true
+
+  # SMART
+  log "$BBLOG" "SMART check..."
+  sudo smartctl -a "$DISK" 2>&1 | tee "$SMARTLOG" \
+    | grep -E 'Device Model|User Capacity|SMART overall-health|Reallocated_Sector_Ct|Current_Pending_Sector|Offline_Uncorrectable' \
+    | tee -a "$BBLOG" || true
+  sudo smartctl -H "$DISK" 2>&1 | grep 'SMART overall-health' | tee -a "$BBLOG" \
+    || echo "[$(date)] SMART overall-health: UNKNOWN" | tee -a "$BBLOG"
+
+  # Badblocks
+  log "$BBLOG" "Starting badblocks scan on $DISK (may take many hours)..."
+  if bbmaster_complete; then
+    log "$BBLOG" "Reusing completed badblocks result; skipping scan."
+  else
+    if [[ -f "$BBMASTER" ]] && [[ -n "$(stalled_pct)" ]]; then
+      run_bb_resume_past_stall
+    else
+      rm -f "$BBNEW"
+      if [[ -f "$BBMASTER" ]]; then
+        sudo "$BADBLOCKS_BIN" -b "$BADBLOCKS_BLOCK_SIZE" -sv \
+          -i "$BBMASTER" -o "$BBNEW" "$DISK" 2>&1 | tee -a "$BBLOG"
+        bbmaster_merge "$BBMASTER" "$BBNEW"
+      else
+        sudo "$BADBLOCKS_BIN" -b "$BADBLOCKS_BLOCK_SIZE" -sv \
+          -o "$BBNEW" "$DISK" 2>&1 | tee -a "$BBLOG"
+        bbmaster_merge "$BBNEW"
+      fi
+    fi
+    log "$BBLOG" "Badblocks scan complete."
+  fi
+
+  # mkfs.ext4
+  log "$MKFSLOG" "Formatting $DISK as ext4 (label=${LABEL})..."
+  mkfs_bb_list
+  local bbcount
+  bbcount=$(wc -l < "$BBMKFSLIST" | tr -d ' ')
+  if [[ "$bbcount" -gt 0 ]]; then
+    log "$MKFSLOG" "${bbcount} filesystem blocks marked bad. Passing list to mkfs."
+    sudo "$MKFS_BIN" -F -b "$MKFS_BLOCK_SIZE" -L "$LABEL" -l "$BBMKFSLIST" "$DISK" 2>&1 \
+      | tee -a "$MKFSLOG"
+  else
+    log "$MKFSLOG" "No bad blocks. Formatting clean."
+    sudo "$MKFS_BIN" -F -b "$MKFS_BLOCK_SIZE" -L "$LABEL" "$DISK" 2>&1 | tee -a "$MKFSLOG"
+  fi
+  log "$MKFSLOG" "mkfs complete."
+
+  # Verify
+  log "$MKFSLOG" "Verifying filesystem..."
+  sudo "$DUMPE2FS_BIN" -h "$DISK" 2>&1 \
+    | grep -E 'Filesystem state|Block count|Block size|Filesystem volume name|Filesystem UUID' \
+    | tee -a "$MKFSLOG"
+
+  # Eject
+  log "$MKFSLOG" "Ejecting $DISK..."
+  diskutil eject "$DISK" 2>&1 | tee -a "$MKFSLOG"
+
+  log "$MKFSLOG" "=== DONE ${disk_id} pipeline ==="
+  notify "disk ${disk_id} — pipeline COMPLETE" "disk monitor"
+}
+
+# ---------------------------------------------------------------------------
+# Watcher (stall detection + auto-restart)
+# ---------------------------------------------------------------------------
+pipeline_running() {
+  pgrep -f "citta_disk_pipeline.*--run-pipeline-internal|badblocks.* $DISK|mkfs.ext4.* $DISK" \
+    >/dev/null 2>&1
+}
+
+force_stop_pipeline() {
+  sudo pkill -f "citta_disk_pipeline.*--run-pipeline-internal|badblocks.* $DISK|mkfs.ext4.* $DISK" \
+    >/dev/null 2>&1 || true
+  sleep 2
+}
+
+start_pipeline_bg() {
+  log "$WATCHLOG" "Starting pipeline in background..."
+  notify "disk $(basename "$DISK") pipeline restarting" "disk monitor"
+  nohup sudo bash "$0" --run-pipeline-internal --disk "$DISK" \
+    --label "$LABEL" >> "$WATCHLOG" 2>&1 &
+  sleep 3
+  if pipeline_running; then
+    log "$WATCHLOG" "Pipeline started."
+  else
+    log "$WATCHLOG" "WARNING: pipeline did not start."
+  fi
+}
+
+run_watcher() {
+  log "$WATCHLOG" "=== Watcher started (disk: $DISK) ==="
+
+  # Sudo keepalive inside watcher too
+  ( while true; do sudo -v 2>/dev/null; sleep 60; done ) &
+  local sudo_pid=$!
+  trap "kill $sudo_pid 2>/dev/null; exit" EXIT INT TERM
+
+  [[ -f "$LAST_PROGRESS_STATE" ]] || echo "|0" > "$LAST_PROGRESS_STATE"
+
+  local stall_max=$(( STALL_SECONDS / CHECK_EVERY_SECONDS ))
+  local milestone_last=-10
+  [[ -f "$MILESTONE_STATE" ]] && milestone_last=$(cat "$MILESTONE_STATE" 2>/dev/null || echo -10)
+
+  while true; do
+    # Done?
+    if grep -qE "=== DONE $(basename "$DISK") pipeline" "$MKFSLOG" 2>/dev/null; then
+      log "$WATCHLOG" "DONE marker found. Stopping watcher."
+      notify "disk $(basename "$DISK") DONE" "disk monitor"
+      exit 0
+    fi
+
+    if pipeline_running; then
+      local p
+      p=$(strings "$BBLOG" 2>/dev/null | grep -Eo '[0-9]+\.[0-9]+% done' | tail -n 1 || true)
+      if [[ -n "$p" ]]; then
+        log "$WATCHLOG" "Progress: $p"
+
+        local last_line unchanged
+        last_line=$(cut -d'|' -f1 "$LAST_PROGRESS_STATE" 2>/dev/null || echo "")
+        unchanged=$(cut -d'|' -f2 "$LAST_PROGRESS_STATE" 2>/dev/null || echo 0)
+        if [[ "$p" == "$last_line" ]]; then
+          unchanged=$(( unchanged + 1 ))
+        else
+          unchanged=0
+          [[ -f "$STALLED_PROGRESS_FILE" ]] && unlink "$STALLED_PROGRESS_FILE" 2>/dev/null || true
+        fi
+        echo "$p|$unchanged" > "$LAST_PROGRESS_STATE"
+
+        if (( unchanged >= stall_max )); then
+          log "$WATCHLOG" "Stall detected (${STALL_SECONDS}s). Restarting pipeline."
+          notify "disk $(basename "$DISK") stalled — restarting" "disk monitor"
+          echo "$p" > "$STALLED_PROGRESS_FILE"
+          force_stop_pipeline
+          start_pipeline_bg
+          echo "|0" > "$LAST_PROGRESS_STATE"
+          sleep "$CHECK_EVERY_SECONDS"
+          continue
+        fi
+
+        # 10% milestones
+        local pint
+        pint=$(echo "$p" | sed -nE 's/^([0-9]+)\.[0-9]+% done$/\1/p' || true)
+        if [[ -n "$pint" ]]; then
+          local ms=$(( pint / 10 * 10 ))
+          if (( ms >= 10 && ms > milestone_last )); then
+            milestone_last=$ms
+            echo "$ms" > "$MILESTONE_STATE"
+            log "$WATCHLOG" "Milestone: ${ms}%"
+            notify "disk $(basename "$DISK") reached ${ms}%" "disk monitor"
+          fi
+        fi
+      fi
+    else
+      log "$WATCHLOG" "Pipeline not running. Restarting..."
+      start_pipeline_bg
+    fi
+
+    sleep "$CHECK_EVERY_SECONDS"
+  done
+}
+
+# ---------------------------------------------------------------------------
+# Periodic status reporter (background, sends notification every N minutes)
+# ---------------------------------------------------------------------------
+run_periodic_status() {
+  local status_log="$REPORT_DIR/periodic_status.log"
+  local last_pct_file="$REPORT_DIR/periodic_status_last.txt"
+  while true; do
+    local ts pct last
+    ts="$(date '+%Y-%m-%d %H:%M:%S %z')"
+    pct=$(strings "$BBLOG" 2>/dev/null | grep -Eo '[0-9]+\.[0-9]+% done' | tail -n 1 || echo "N/A")
+    echo "[$ts] ${pct}" >> "$status_log"
+    if [[ "$pct" != "N/A" ]]; then
+      last=$(cat "$last_pct_file" 2>/dev/null || echo "")
+      if [[ "$pct" != "$last" ]]; then
+        notify "disk $(basename "$DISK"): ${pct}" "disk monitor"
+        echo "$pct" > "$last_pct_file"
+      fi
+    fi
+    sleep "$STATUS_INTERVAL"
+  done
+}
+
+# ---------------------------------------------------------------------------
+# Internal flag used when watcher re-launches the pipeline itself
+# ---------------------------------------------------------------------------
+RUN_PIPELINE_INTERNAL=0
+for a in "$@"; do [[ "$a" == "--run-pipeline-internal" ]] && RUN_PIPELINE_INTERNAL=1; done
+
+# ---------------------------------------------------------------------------
+# Main entry point
+# ---------------------------------------------------------------------------
+
+cleanup_all() {
+  [[ -n "$SUDO_KEEPALIVE_PID" ]] && kill "$SUDO_KEEPALIVE_PID"   2>/dev/null || true
+  [[ -n "$WATCHER_PID" ]]        && kill "$WATCHER_PID"           2>/dev/null || true
+  [[ -n "$STATUS_PID" ]]         && kill "$STATUS_PID"            2>/dev/null || true
+}
+trap cleanup_all EXIT
+
+# --- Status-only ---
+if [[ "$MODE" == "status" ]]; then
+  show_status
+  exit 0
+fi
+
+# --- Resolve disk ---
+if [[ -z "$DISK" ]]; then
+  DISK="$(select_disk)"
+fi
+if [[ -z "$DISK" ]]; then
+  echo "[ERROR] No eligible disk found. Use --disk /dev/diskN or --force to re-run." >&2
+  exit 1
+fi
+
+echo "[INFO] Target disk: $DISK"
+set_file_vars
+
+# --- Internal re-launch (from watcher restart) ---
+if [[ "$RUN_PIPELINE_INTERNAL" == "1" ]]; then
+  ensure_sudo_session
+  run_pipeline
+  exit 0
+fi
+
+# --- Require sudo for run modes ---
+ensure_sudo_session
+
+# --- Check already done (unless --force) ---
+if [[ "$FORCE_RERUN" == "0" ]] && grep -qE "=== DONE $(basename "$DISK") pipeline" "$MKFSLOG" 2>/dev/null; then
+  echo "[INFO] $DISK already DONE. Use --force to re-run."
+  show_status
+  exit 0
+fi
+
+# --- Watch-only ---
+if [[ "$MODE" == "watch-only" ]]; then
+  # Start periodic reporter in background
+  run_periodic_status &
+  STATUS_PID=$!
+  # Run watcher (persistent — restarts itself if pipeline not running)
+  while true; do
+    run_watcher || true
+    echo "[$(date)] Watcher exited; restarting in 5s..." >> "$WATCHLOG"
+    sleep 5
+  done
+fi
+
+# --- Full run mode ---
+# 1. Start pipeline in background
+nohup sudo bash "$0" --run-pipeline-internal --disk "$DISK" \
+  --label "$LABEL" >> "$WATCHLOG" 2>&1 &
+echo "[INFO] Pipeline started in background (log: $WATCHLOG)"
+
+# 2. Start periodic status reporter in background
+run_periodic_status &
+STATUS_PID=$!
+
+# 3. Start watcher (blocks until DONE)
+while true; do
+  run_watcher || true
+  # If watcher exits but pipeline isn't done yet, restart it
+  if grep -qE "=== DONE $(basename "$DISK") pipeline" "$MKFSLOG" 2>/dev/null; then
+    break
+  fi
+  echo "[$(date)] Watcher exited early; restarting in 5s..." >> "$WATCHLOG"
+  sleep 5
+done
+
+echo "[INFO] Pipeline complete for $DISK."
+show_status

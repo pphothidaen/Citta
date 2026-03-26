@@ -5,7 +5,9 @@ import os
 
 load_dotenv()
 
-app = FastAPI(title="Citta Proxy Gateway - IDE Compatible")
+SERVICE_NAME = os.getenv("CITTA_SERVICE_NAME", "gateway-proxy")
+
+app = FastAPI(title=f"Citta {SERVICE_NAME} - IDE Compatible")
 
 ORCHESTRATOR_CODE_DIRECTIVE = """
 You are the core intelligence of 'The Citta' accessed via an IDE coding agent.
@@ -22,12 +24,24 @@ STRICT RULES:
 
 @app.get("/")
 def read_root() -> dict[str, str]:
-    return {"status": "ok", "service": "gateway-proxy"}
+    return {"status": "ok", "service": SERVICE_NAME}
 
 
 @app.get("/health")
 def health() -> dict[str, str]:
-    return {"status": "healthy"}
+    return {"status": "healthy", "service": SERVICE_NAME}
+
+
+@app.post("/v1/ingest")
+async def ingest(request: Request) -> dict[str, object]:
+    payload = await request.json()
+    items = payload.get("items") if isinstance(payload, dict) else None
+    item_count = len(items) if isinstance(items, list) else 1
+    return {
+        "status": "accepted",
+        "service": SERVICE_NAME,
+        "item_count": item_count,
+    }
 
 
 @app.post("/v1/chat/completions")
