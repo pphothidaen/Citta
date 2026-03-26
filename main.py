@@ -1,85 +1,111 @@
-from fastapi import FastAPI, HTTPException, Request
-from litellm import completion
-from dotenv import load_dotenv
-import os
+"""Citta — Phase 1 entry point.
 
-load_dotenv()
+Usage
+-----
+    # 1. Start infrastructure
+    docker compose up -d
 
-SERVICE_NAME = os.getenv("CITTA_SERVICE_NAME", "gateway-proxy")
+    # 2. (Optional) Ingest sample data
+    python main.py --ingest
 
-app = FastAPI(title=f"Citta {SERVICE_NAME} - IDE Compatible")
+    # 3. Run an agent query
+    python main.py --query "What files are in the data lake?"
 
-ORCHESTRATOR_CODE_DIRECTIVE = """
-You are the core intelligence of 'The Citta' accessed via an IDE coding agent.
-STRICT RULES:
-1. NO FLATTERY, NO FLUFF. Omit greetings, pleasantries, and concluding remarks.
-2. If providing architectural advice, enforce this structure:
-   - Positives (Pros)
-   - Negatives (Cons / Blind spots)
-   - Engineering Trade-offs
-3. If writing code: Output production-ready code immediately. Follow ZERO-WASTE principles (optimize compute, minimize latency).
-4. Maintain absolute objectivity.
+Architecture (single-node simulation)
+--------------------------------------
+    Perception (ingestor.py)
+        ↓  embeds & stores chunks in ChromaDB
+        ↓  uploads raw files to MinIO
+    Thinking (agent.py)
+        ↓  ReAct LLM orchestrator (Ollama local)
+        ↓  calls Acting tools as needed
+    Acting (tools.py)
+        ↓  list_objects → MinIO
+        ↓  query_memory → ChromaDB
 """
+import argparse
+import logging
+import sys
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+logger = logging.getLogger("citta.main")
 
 
-@app.get("/")
-def read_root() -> dict[str, str]:
-    return {"status": "ok", "service": SERVICE_NAME}
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="citta",
+        description="Citta Phase 1 — Local AI edge simulation",
+    )
+    parser.add_argument(
+        "--ingest",
+        action="store_true",
+        help="Run sample data ingestion into ChromaDB and MinIO, then exit.",
+    )
+    parser.add_argument(
+        "--query",
+        type=str,
+        default=None,
+        help="Send a single query to the agent and print the response.",
+    )
+    return parser.parse_args()
 
 
-@app.get("/health")
-def health() -> dict[str, str]:
-    return {"status": "healthy", "service": SERVICE_NAME}
+def _run_ingest() -> None:
+    """Demonstrate the Perception layer with sample data."""
+    from citta.perception.ingestor import ensure_bucket, ingest_texts
+
+    logger.info("=== Perception: ensuring MinIO bucket exists ===")
+    ensure_bucket()
+
+    sample_texts = [
+        "Citta is a zero-waste distributed AI edge architecture.",
+        "Node 1 (Brain): MacBook Pro M4 — high-compute orchestrator.",
+        "Node 2 (Data Lake): Synology DS224+ running MinIO and ChromaDB.",
+        "Node 3 (Worker): Debian J1900 running n8n automation.",
+        "Node 4 (Edge): ARM-based scrapers powered by Openclaw.",
+    ]
+    sample_metadata = [{"source": "bootstrap", "node": str(i)} for i in range(len(sample_texts))]
+
+    logger.info("=== Perception: ingesting %d chunks into ChromaDB ===", len(sample_texts))
+    ingest_texts(sample_texts, sample_metadata)
+    logger.info("Ingestion complete.")
 
 
-@app.post("/v1/ingest")
-async def ingest(request: Request) -> dict[str, object]:
-    payload = await request.json()
-    items = payload.get("items") if isinstance(payload, dict) else None
-    item_count = len(items) if isinstance(items, list) else 1
-    return {
-        "status": "accepted",
-        "service": SERVICE_NAME,
-        "item_count": item_count,
-    }
+def _run_query(query: str) -> None:
+    """Pass a query through the full Thinking → Acting pipeline."""
+    from citta.thinking.agent import build_agent, run
+
+    logger.info("=== Thinking: building agent ===")
+    agent = build_agent()
+
+    logger.info("=== Thinking: running query ===\n%s", query)
+    answer = run(query, agent=agent)
+    print("\n--- Agent Response ---")
+    print(answer)
 
 
-@app.post("/v1/chat/completions")
-async def chat_completions(request: Request):
+def main() -> None:
+    args = _parse_args()
+
+    if not args.ingest and args.query is None:
+        # Default: ingest sample data then run a demo query
+        _run_ingest()
+        _run_query("What files are in the data lake?")
+        return
+
+    if args.ingest:
+        _run_ingest()
+
+    if args.query:
+        _run_query(args.query)
+
+
+if __name__ == "__main__":
     try:
-        body = await request.json()
-        original_messages = body.get("messages", [])
-
-        # Inject a single authoritative system directive before user/assistant turns.
-        system_injection = [{"role": "system", "content": ORCHESTRATOR_CODE_DIRECTIVE}]
-        modified_messages = system_injection + [
-            msg for msg in original_messages if msg.get("role") != "system"
-        ]
-
-        requested_model = body.get("model", "deepseek-chat")
-        model_aliases = {
-            "gemini/gemini-1.5-pro": "gemini/gemini-2.0-flash",
-            "gemini-1.5-pro": "gemini/gemini-2.0-flash",
-            # LiteLLM 1.22.x handles DeepSeek reliably through OpenAI-compatible routing.
-            "deepseek-chat": "openai/deepseek-chat",
-            "deepseek/deepseek-chat": "openai/deepseek-chat",
-            "deepseek-reasoner": "openai/deepseek-reasoner",
-            "deepseek/deepseek-reasoner": "openai/deepseek-reasoner",
-        }
-        target_model = model_aliases.get(requested_model, requested_model)
-
-        completion_kwargs = {
-            "model": target_model,
-            "messages": modified_messages,
-            "temperature": body.get("temperature", 0.1),
-            "stream": body.get("stream", False),
-        }
-
-        if target_model.startswith("openai/deepseek-"):
-            completion_kwargs["api_base"] = os.getenv("DEEPSEEK_API_BASE", "https://api.deepseek.com/v1")
-            completion_kwargs["api_key"] = os.getenv("DEEPSEEK_API_KEY", "")
-
-        response = completion(**completion_kwargs)
-        return response
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        main()
+    except KeyboardInterrupt:
+        logger.info("Interrupted.")
+        sys.exit(0)
