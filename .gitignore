@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 ## ─────────────────────────────────────────────────────────
 ## CITTA — Project-specific ignores (top of file, highest priority)
 ## ─────────────────────────────────────────────────────────
@@ -30,7 +31,6 @@ Docs/private/
 *.userosscache
 *.sln.docstates
 *.env
-.env
 
 # User-specific files (MonoDevelop/Xamarin Studio)
 *.userprefs
