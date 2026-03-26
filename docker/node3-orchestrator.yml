@@ -1,0 +1,55 @@
+services:
+  semantic-cache:
+    image: redis/redis-stack:latest
+    container_name: citta_semantic_cache_node3
+    ports:
+      - "6380:6379"   # Redis
+      - "8443:8001"   # RedisInsight UI
+    volumes:
+      - semantic_cache_data:/data
+    environment:
+      REDIS_ARGS: --requirepass ${REDIS_AUTH:-change-me}
+    restart: unless-stopped
+
+  memory-layer:
+    image: ghcr.io/chroma-core/chroma:latest
+    container_name: citta_memory_node3
+    ports:
+      - "8100:8000"
+    volumes:
+      - memory_data:/chroma/chroma
+    environment:
+      IS_PERSISTENT: "TRUE"
+      ANONYMIZED_TELEMETRY: "FALSE"
+    restart: unless-stopped
+
+  orchestrator:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: citta_orchestrator_node3
+    ports:
+      - "8001:8000"
+    env_file:
+      - ../.env
+    environment:
+      CITTA_SERVICE_NAME: orchestrator
+      REDIS_URL: redis://:${REDIS_AUTH:-change-me}@semantic-cache:6379/0
+      QDRANT_URL: ${QDRANT_URL:-http://node2.local:6333}
+      NODE1_URL: ${NODE1_URL:-http://node1.local:8000}
+      CHROMA_URL: http://memory-layer:8000
+      ENABLE_SEMANTIC_CACHE: "true"
+      CACHE_SIMILARITY_THRESHOLD: "0.92"
+      CONTEXT_MINIFICATION: "true"
+    depends_on:
+      - semantic-cache
+      - memory-layer
+    restart: unless-stopped
+
+volumes:
+  semantic_cache_data:
+  memory_data:
+
+networks:
+  default:
+    name: citta_node3_net
