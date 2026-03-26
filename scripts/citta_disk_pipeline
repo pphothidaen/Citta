@@ -9,11 +9,13 @@
 #   --disk DISK       Target disk (e.g. /dev/disk4). Default: interactive menu
 #                     (auto if only one external disk found).
 #   --label LABEL     Filesystem label. Default: citta_data
-#   --min-bytes N     Minimum expected disk size in bytes. Default: 900000000000
 #   --status          Show current scan status and exit (no sudo needed)
 #   --watch-only      Start watcher/monitor without re-running the pipeline
 #   --force           Re-run pipeline even if DONE marker is present
 #   --help            Show this help
+#
+# Disk capacity is detected automatically at runtime.
+# STALL_SKIP_BLOCKS is computed dynamically as ~1% of disk size.
 #
 # Examples:
 #   sudo bash citta_disk_pipeline                     # show disk menu / auto if one disk
@@ -30,20 +32,26 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 DISK=""
 LABEL="citta_data"
-EXPECTED_MIN_BYTES=900000000000
 MODE="run"        # run | status | watch-only
 FORCE_RERUN=0
+RUN_PIPELINE_INTERNAL=0
 
 BADBLOCKS_BIN="/opt/homebrew/opt/e2fsprogs/sbin/badblocks"
 MKFS_BIN="/opt/homebrew/opt/e2fsprogs/sbin/mkfs.ext4"
 DUMPE2FS_BIN="/opt/homebrew/opt/e2fsprogs/sbin/dumpe2fs"
 BADBLOCKS_BLOCK_SIZE=1024
 MKFS_BLOCK_SIZE=4096
-STALL_SKIP_BLOCKS=1048576    # 1 GB in 1 KB blocks; doubles each repeat stall
+# STALL_SKIP_BLOCKS is computed dynamically in detect_disk_params() based on actual disk size
+STALL_SKIP_BLOCKS=1048576    # fallback default (1 GB in 1 KB blocks); auto-overridden at runtime
 STALL_REPEAT_THRESHOLD=3
 STALL_SECONDS=180
 CHECK_EVERY_SECONDS=30
 STATUS_INTERVAL=600          # periodic macOS notification interval (seconds, default 10 min)
+
+# Set after disk is resolved via detect_disk_params()
+DISK_SIZE_BYTES=0
+DISK_SIZE_GB=0
+DISK_SIZE_LABEL="unknown"
 
 REPORT_DIR="$HOME/citta_drive_reports"
 SUDO_KEEPALIVE_PID=""
@@ -57,12 +65,12 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --disk)        DISK="$2";            shift 2 ;;
     --label)       LABEL="$2";           shift 2 ;;
-    --min-bytes)   EXPECTED_MIN_BYTES="$2"; shift 2 ;;
     --status)      MODE="status";        shift ;;
     --watch-only)  MODE="watch-only";    shift ;;
-    --force)       FORCE_RERUN=1;        shift ;;
-    --help|-h)     sed -n '3,30p' "$0"; exit 0 ;;
-    /dev/disk*)    DISK="$1";            shift ;;
+    --force)                 FORCE_RERUN=1;           shift ;;
+    --run-pipeline-internal) RUN_PIPELINE_INTERNAL=1;  shift ;;
+    --help|-h)               sed -n '3,30p' "$0"; exit 0 ;;
+    /dev/disk*)              DISK="$1";               shift ;;
     *)  echo "Unknown option: $1"; sed -n '3,30p' "$0"; exit 1 ;;
   esac
 done
@@ -215,6 +223,40 @@ ensure_sudo_session() {
 }
 
 # ---------------------------------------------------------------------------
+# Detect real-time disk capacity and compute dynamic parameters
+# ---------------------------------------------------------------------------
+detect_disk_params() {
+  DISK_SIZE_BYTES=$(diskutil info "$DISK" 2>/dev/null \
+    | sed -nE 's/.*\(([0-9]+) Bytes\).*/\1/p' | head -n 1)
+  if [[ -z "$DISK_SIZE_BYTES" || "$DISK_SIZE_BYTES" -le 0 ]]; then
+    echo "[ERROR] Cannot read capacity for $DISK. Is the disk connected?" >&2
+    exit 1
+  fi
+
+  # Human-readable label
+  DISK_SIZE_GB=$(( DISK_SIZE_BYTES / 1000000000 ))
+  if   (( DISK_SIZE_GB >= 1800 )); then DISK_SIZE_LABEL="~2TB (${DISK_SIZE_GB}GB)"
+  elif (( DISK_SIZE_GB >= 900  )); then DISK_SIZE_LABEL="~1TB (${DISK_SIZE_GB}GB)"
+  elif (( DISK_SIZE_GB >= 450  )); then DISK_SIZE_LABEL="~500GB (${DISK_SIZE_GB}GB)"
+  elif (( DISK_SIZE_GB >= 220  )); then DISK_SIZE_LABEL="~250GB (${DISK_SIZE_GB}GB)"
+  else                                  DISK_SIZE_LABEL="${DISK_SIZE_GB}GB"
+  fi
+
+  # STALL_SKIP_BLOCKS: ~1% of disk size in 1KB blocks
+  # min = 256MB (262144 blocks), max = 2GB (2097152 blocks)
+  local one_pct=$(( DISK_SIZE_BYTES / 100 / BADBLOCKS_BLOCK_SIZE ))
+  local min_skip=$(( 256 * 1024 ))       # 256 MB
+  local max_skip=$(( 2 * 1024 * 1024 ))  # 2 GB
+  if (( one_pct < min_skip )); then one_pct=$min_skip; fi
+  if (( one_pct > max_skip )); then one_pct=$max_skip; fi
+  STALL_SKIP_BLOCKS=$one_pct
+
+  echo "[INFO] Disk: $DISK"
+  echo "[INFO] Capacity: ${DISK_SIZE_LABEL} (${DISK_SIZE_BYTES} bytes)"
+  echo "[INFO] STALL_SKIP_BLOCKS: ${STALL_SKIP_BLOCKS} blocks (~$((STALL_SKIP_BLOCKS / 1024)) MB per skip window)"
+}
+
+# ---------------------------------------------------------------------------
 # File names derived from disk id
 # ---------------------------------------------------------------------------
 set_file_vars() {
@@ -234,6 +276,8 @@ set_file_vars() {
   MILESTONE_STATE="$REPORT_DIR/watch_${disk_id}_last_milestone.txt"
   LAST_PROGRESS_STATE="$REPORT_DIR/watch_${disk_id}_last_progress.txt"
   DONE_MARKER="=== DONE $(basename "$DISK")"
+  # Detect disk capacity and compute dynamic values now that DISK is known
+  detect_disk_params
 }
 
 # ---------------------------------------------------------------------------
@@ -251,9 +295,8 @@ bbmaster_complete() {
 }
 
 bb_last_block() {
-  local size_bytes
-  size_bytes=$(diskutil info "$DISK" | sed -nE 's/.*\(([0-9]+) Bytes\).*/\1/p' | head -n 1)
-  echo $(( size_bytes / BADBLOCKS_BLOCK_SIZE - 1 ))
+  # Use cached DISK_SIZE_BYTES (set by detect_disk_params)
+  echo $(( DISK_SIZE_BYTES / BADBLOCKS_BLOCK_SIZE - 1 ))
 }
 
 stalled_pct() {
@@ -330,18 +373,12 @@ run_pipeline() {
   disk_id="$(basename "$DISK")"
 
   log "$BBLOG" "=== START ${disk_id} pipeline ==="
+  log "$BBLOG" "Disk: $DISK | Capacity: ${DISK_SIZE_LABEL} (${DISK_SIZE_BYTES} bytes)"
+  log "$BBLOG" "STALL_SKIP_BLOCKS: ${STALL_SKIP_BLOCKS} (~$((STALL_SKIP_BLOCKS / 1024)) MB per skip)"
 
-  # Preflight
+  # Preflight — verify disk is still present and readable
   if ! diskutil info "$DISK" >/dev/null 2>&1; then
-    log "$BBLOG" "ERROR: $DISK not found. Aborting."; exit 1
-  fi
-  local size_bytes
-  size_bytes=$(diskutil info "$DISK" | sed -nE 's/.*\(([0-9]+) Bytes\).*/\1/p' | head -n 1)
-  if [[ -z "$size_bytes" ]]; then
-    log "$BBLOG" "ERROR: cannot read disk size. Aborting."; exit 1
-  fi
-  if (( size_bytes < EXPECTED_MIN_BYTES )); then
-    log "$BBLOG" "ERROR: disk too small (${size_bytes} B < ${EXPECTED_MIN_BYTES} B). Aborting."; exit 1
+    log "$BBLOG" "ERROR: $DISK not found. Is the disk still connected? Aborting."; exit 1
   fi
   diskutil info "$DISK" \
     | grep -E 'Device Identifier|Device / Media Name|Disk Size|Protocol|Device Location' \
@@ -530,12 +567,6 @@ run_periodic_status() {
     sleep "$STATUS_INTERVAL"
   done
 }
-
-# ---------------------------------------------------------------------------
-# Internal flag used when watcher re-launches the pipeline itself
-# ---------------------------------------------------------------------------
-RUN_PIPELINE_INTERNAL=0
-for a in "$@"; do [[ "$a" == "--run-pipeline-internal" ]] && RUN_PIPELINE_INTERNAL=1; done
 
 # ---------------------------------------------------------------------------
 # Main entry point
